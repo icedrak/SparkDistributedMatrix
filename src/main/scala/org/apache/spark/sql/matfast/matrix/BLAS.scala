@@ -25,6 +25,19 @@ import com.github.fommil.netlib.BLAS.{getInstance => NativeBLAS}
 import org.apache.spark.internal.Logging
 import org.apache.spark.mllib.linalg.{DenseVector, SparseVector, Vector}
 
+
+import jcuda._
+import jcuda.jcublas._
+import jcuda.jcusparse._
+import jcuda.driver.CUdevice_attribute._
+import jcuda.driver.JCudaDriver._
+import jcuda.driver._
+import jcuda.runtime._
+import jcuda.driver.CUmodule
+import jcuda.driver.CUdevice_attribute
+import org.slf4j.Logger
+
+
 /**
  * BLAS routines for MLlib's vectors and matrices.
  */
@@ -320,6 +333,92 @@ object BLAS extends Serializable with Logging {
     }
   }
 
+  private def gemmdddGPU(
+                       alpha: Double,
+                       A: DenseMatrix,
+                       B: DenseMatrix,
+                       beta: Double,
+                       C: DenseMatrix): Unit = {
+    val tAstr = if (A.isTransposed) "T" else "N"
+    val tBstr = if (B.isTransposed) "T" else "N"
+    val lda = if (!A.isTransposed) A.numRows else A.numCols
+    val ldb = if (!B.isTransposed) B.numRows else B.numCols
+
+    require(A.numCols == B.numRows,
+      s"The columns of A don't match the rows of B. A: ${A.numCols}, B: ${B.numRows}")
+    require(A.numRows == C.numRows,
+      s"The rows of C don't match the rows of A. C: ${C.numRows}, A: ${A.numRows}")
+    require(B.numCols == C.numCols,
+      s"The columns of C don't match the columns of B. C: ${C.numCols}, A: ${B.numCols}")
+
+
+        println("In LOW-OPTIMIZATION");
+        // modified code for using cuBLAS kernel instead of SystemML's kernel
+        //
+        val blockA = A.values;
+        val blockB = B.values;
+
+
+        println("The size of block:" + A.numRows + "x" + B.numCols)
+        val blkSize = A.numRows*B.numCols
+
+        val d_A = new Pointer()
+        val d_B = new Pointer()
+        val d_C = new Pointer()
+        val alpha = 1.0f
+        val beta = 1.0f
+
+        JCublas.cublasInit()
+        JCuda.cudaMalloc(d_A, blkSize * Sizeof.DOUBLE)
+        JCuda.cudaMalloc(d_B, blkSize * Sizeof.DOUBLE)
+        JCuda.cudaMalloc(d_C, blkSize * Sizeof.DOUBLE)
+
+        JCuda.cudaMemset(d_C,0, blkSize * Sizeof.DOUBLE)
+
+        JCublas.cublasSetVector(blkSize, Sizeof.DOUBLE, Pointer.to(blockA), 1, d_A, 1)
+        JCublas.cublasSetVector(blkSize, Sizeof.DOUBLE, Pointer.to(blockB), 1, d_B, 1)
+
+
+    //				m1.cleanupBlock(true, false);
+    //				m2.cleanupBlock(true, false);
+
+
+        val before = C.values(0)
+
+        JCublas.cublasDgemm('n', 'n', A.numRows, A.numRows, A.numRows, alpha, d_A, A.numRows, d_B, A.numRows, beta, d_C, A.numRows)
+
+
+
+    //				double resultC[] = new double[blkSize];
+    //				JCublas.cublasGetVector(blkSize, Sizeof.DOUBLE, d_C, 1, Pointer.to(resultC), 1);
+        JCublas.cublasGetVector(blkSize, Sizeof.DOUBLE, d_C, 1, Pointer.to(C.values), 1)
+
+        JCublas.cublasFree(d_C);
+        JCublas.cublasFree(d_B);
+        JCublas.cublasFree(d_A);
+        JCublas.cublasShutdown();
+
+
+    //
+    //				ret.init(resultC, m, n);
+    //
+    //				resultC = null;
+    //				d_A = null;
+    //				d_B = null;
+    //				d_C = null;
+
+
+        val after = C.values(0)
+
+
+
+        println("comparision for result - before: " + before +" after: "+after )
+
+
+    ////
+    //    nativeBLAS.dgemm(tAstr, tBstr, A.numRows, B.numCols, A.numCols, alpha, A.values, lda,
+    //      B.values, ldb, beta, C.values, C.numRows)
+  }
   /**
     * C := alpha * A * B + beta * C
     * For `DenseMatrix` A.
@@ -341,6 +440,10 @@ object BLAS extends Serializable with Logging {
       s"The rows of C don't match the rows of A. C: ${C.numRows}, A: ${A.numRows}")
     require(B.numCols == C.numCols,
       s"The columns of C don't match the columns of B. C: ${C.numCols}, A: ${B.numCols}")
+
+
+
+////
     nativeBLAS.dgemm(tAstr, tBstr, A.numRows, B.numCols, A.numCols, alpha, A.values, lda,
       B.values, ldb, beta, C.values, C.numRows)
   }
@@ -349,6 +452,97 @@ object BLAS extends Serializable with Logging {
     * C := alpha * A * B + beta * C
     * For `SparseMatrix` A.
     */
+
+  private def gemmsddGPU(alpha: Double,
+                         A: SparseMatrix,
+                         B: DenseMatrix,
+                         beta: Double,
+                         C: DenseMatrix):Unit ={
+    //    println("In LOW-OPTIMIZATION");
+        // modified code for using cuBLAS kernel instead of SystemML's kernel
+        //
+//        val blockA = A.values;
+    val blockB = B.values;
+
+
+    val (rowPtr, colIdx, values) = (A.colPtrs, A.rowIndices, A.values)
+    val nnz = values.length
+
+
+    println("The size of block:" + A.numRows + "x" + B.numCols)
+    val blkSize = A.numRows*B.numCols
+
+
+    val csrRowPtrA = new Pointer()
+    val csrColIndA = new Pointer()
+    val csrValA = new Pointer()
+
+    val d_B = new Pointer()
+    val d_C = new Pointer()
+    val alpha = 1.0f
+    val beta = 1.0f
+
+
+    val handle = new cusparseHandle
+    val descra = new cusparseMatDescr
+
+    JCusparse.setExceptionsEnabled(true)
+
+    JCusparse.cusparseCreate(handle)
+    JCusparse.cusparseCreateMatDescr(descra)
+    JCusparse.cusparseSetMatType(descra, cusparseMatrixType.CUSPARSE_MATRIX_TYPE_GENERAL)
+    JCusparse.cusparseSetMatIndexBase(descra, cusparseIndexBase.CUSPARSE_INDEX_BASE_ZERO)
+
+
+    JCuda.cudaMalloc(csrRowPtrA, rowPtr.length * Sizeof.INT)
+    JCuda.cudaMalloc(csrColIndA, colIdx.length * Sizeof.INT)
+    JCuda.cudaMalloc(csrValA, nnz * Sizeof.DOUBLE)
+
+    JCuda.cudaMemcpy(csrRowPtrA, Pointer.to(rowPtr), rowPtr.length * Sizeof.INT, cudaMemcpyKind.cudaMemcpyHostToDevice)
+    JCuda.cudaMemcpy(csrColIndA, Pointer.to(colIdx), colIdx.length * Sizeof.INT, cudaMemcpyKind.cudaMemcpyHostToDevice)
+    JCuda.cudaMemcpy(csrValA, Pointer.to(values), values.length * Sizeof.DOUBLE, cudaMemcpyKind.cudaMemcpyHostToDevice)
+
+
+    JCuda.cudaMalloc(d_B, B.numRows* B.numCols * Sizeof.DOUBLE)
+    JCuda.cudaMemcpy(d_B, Pointer.to(blockB), B.numRows* B.numCols * Sizeof.DOUBLE, cudaMemcpyKind.cudaMemcpyHostToDevice)
+
+    JCuda.cudaMalloc(d_C, blkSize * Sizeof.DOUBLE)
+    JCuda.cudaMemset(d_C, 0, blkSize * Sizeof.DOUBLE)
+
+
+
+
+    val before = C.values(0)
+
+    JCusparse.cusparseDcsrmm(handle,
+      cusparseOperation.CUSPARSE_OPERATION_NON_TRANSPOSE,
+      1000, 1000, 1000, nnz,
+      Pointer.to(Array[Double](1.0)), descra,
+      csrValA, csrRowPtrA, csrColIndA,
+      d_B, 1000,
+      Pointer.to(Array[Double](1.0)),
+      d_C, 1000)
+
+
+    JCuda.cudaMemcpy(Pointer.to(C.values), d_C, blkSize * Sizeof.DOUBLE, cudaMemcpyKind.cudaMemcpyDeviceToHost)
+
+    JCuda.cudaFree(d_B)
+    JCuda.cudaFree(d_C)
+
+
+    JCuda.cudaFree(csrColIndA)
+    JCuda.cudaFree(csrRowPtrA)
+    JCuda.cudaFree(csrValA)
+
+    JCusparse.cusparseDestroyMatDescr(descra)
+    JCusparse.cusparseDestroy(handle)
+
+    val after = C.values(0)
+
+
+
+    println("comparision for result - before: " + before +" after: "+after )
+  }
   private def gemmsdd(
                        alpha: Double,
                        A: SparseMatrix,

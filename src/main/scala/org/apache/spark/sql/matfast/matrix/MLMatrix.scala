@@ -34,6 +34,7 @@ import org.apache.spark.sql.matfast.util.MLMatrixSerializer
 import org.apache.spark.sql.types._
 
 
+
 @SQLUserDefinedType(udt = classOf[MatrixUDT])
 @Since("1.0.0")
 abstract class MLMatrix extends Serializable {
@@ -455,6 +456,14 @@ object DenseMatrix {
       s"$numRows x $numCols dense matrix is too large to allocate")
     new DenseMatrix(numRows, numCols, Array.fill(numRows * numCols)(rng.nextDouble()))
   }
+
+  def randR(numRows: Int, numCols: Int, rng: java.util.Random): DenseMatrix ={
+    require(numRows.toLong * numCols <= Int.MaxValue, s"$numRows x $numCols dense matrix is too large to allocate")
+    val tmp = Array.fill(1000*1000)(0.0)
+    Array.fill(numRows*numCols)(rng.nextDouble()).copyToArray(tmp)
+    new DenseMatrix(1000, 1000, tmp)
+  }
+
 
   /**
     * Generate a `DenseMatrix` consisting of `i.i.d.` gaussian random numbers.

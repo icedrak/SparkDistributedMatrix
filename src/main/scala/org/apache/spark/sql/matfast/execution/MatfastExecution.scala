@@ -715,11 +715,14 @@ case class MatrixMatrixMultiplicationExecution(left: SparkPlan,
       val leftRowBlkNum = leftRowNum / blkSize
       val rightColBlkNum = rightColNum / blkSize
       if (leftRowBlkNum <= rightColBlkNum) {
+        println(s"BMM")
         MatfastExecutionHelper.multiplyOuterProductDuplicateLeft(left.execute(), right.execute())
       } else {
+        println(s"BMM")
         MatfastExecutionHelper.multiplyOuterProductDuplicateRight(left.execute(), right.execute())
       }
     } else {
+      println(s"CPMM")
       MatfastExecutionHelper.matrixMultiplyGeneral(left.execute(), right.execute())
     }
   }
